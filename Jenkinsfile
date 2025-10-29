@@ -17,12 +17,16 @@ pipeline {
   stages {
 
     stage('Checkout') {
-      steps {
-        echo "📦 Cloning repository..."
-        checkout scm
-        sh 'git branch -v || true'
-      }
+        steps {
+            echo "📦 Cloning repository using credentials..."
+            git(
+            branch: 'main',
+            url: 'https://github.com/siddharth0203/DemoPythonJenkins.git',
+            credentialsId: 'Github-ID'
+            )
+        }
     }
+
 
     stage('Build Docker Image') {
       steps {
