@@ -5,7 +5,7 @@ pipeline {
     // 🔧 Jenkins credentials ID for Docker Hub
     DOCKERHUB_CREDS = credentials('dockerhub-password')
 
-    // 🔧 Docker Hub image name (your repo)
+    // 🔧 Docker Hub image name
     IMAGE_NAME = "siddharthjamalpur/siddharth-test"
   }
 
@@ -16,42 +16,42 @@ pipeline {
   stages {
 
     stage('Checkout') {
-        steps {
-            echo "📦 Cloning repository using credentials..."
-            git(
-            branch: 'main',
-            url: 'https://github.com/siddharth0203/DemoPythonJenkins.git',
-            credentialsId: 'Github-ID'
-            )
-        }
+      steps {
+        echo "📦 Cloning repository..."
+        git(
+          branch: 'main',
+          url: 'https://github.com/siddharth0203/DemoPythonJenkins.git',
+          credentialsId: 'github-token'
+        )
+      }
     }
-
 
     stage('Build Docker Image') {
       steps {
-        script {
-          echo "🐳 Building Docker image..."
-          sh """
-            docker build -t generic-app:${BUILD_NUMBER} .
-            docker tag generic-app:${BUILD_NUMBER} ${IMAGE_NAME}:${BUILD_NUMBER}
-          """
-        }
+        echo "🐳 Building Docker image..."
+        sh """
+          docker build -t generic-app:${BUILD_NUMBER} .
+          docker tag generic-app:${BUILD_NUMBER} ${IMAGE_NAME}:${BUILD_NUMBER}
+        """
       }
     }
 
     stage('Scan Docker Image (Trivy)') {
       steps {
         script {
-          echo "🔍 Scanning Docker image with Trivy..."
-          // Scan the image for vulnerabilities and save report
+          echo "🔍 Scanning image for vulnerabilities..."
           sh '''
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
               aquasec/trivy:latest image \
               --exit-code 0 --no-progress --format json generic-app:${BUILD_NUMBER} > scan.json || true
           '''
 
-          // Count vulnerabilities (using jq)
-          def vulnCount = sh(script: "cat scan.json | jq '.Results[0].Vulnerabilities | length' 2>/dev/null || echo 0", returnStdout: true).trim()
+          // Count vulnerabilities using jq
+          def vulnCount = sh(
+            script: "cat scan.json | jq '.Results[0].Vulnerabilities | length' 2>/dev/null || echo 0",
+            returnStdout: true
+          ).trim()
+
           echo "🧮 Vulnerabilities found: ${vulnCount}"
           env.VULN_COUNT = vulnCount
         }
@@ -73,12 +73,13 @@ pipeline {
       }
     }
 
-    stage('Push to Docker Hub') {
+    stage('Login & Push to Docker Hub') {
       when {
         expression { currentBuild.result == null || currentBuild.result == 'SUCCESS' }
       }
       steps {
-        withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CREDS}", usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
+        echo "🔐 Logging in and pushing image to Docker Hub..."
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-password', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
           sh '''
             echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
             docker push ${IMAGE_NAME}:${BUILD_NUMBER}
