@@ -1,77 +1,105 @@
 pipeline {
-    agent any
+  agent any
 
-    environment {
-        // 👇 Replace these with your details
-        DOCKERHUB_CREDENTIALS = credentials('dockerhub-password') // Jenkins credential ID
-        IMAGE_NAME = "siddharthjamalpur/siddharth-test"                         // Docker Hub repo name
-        GIT_REPO = "https://github.com/siddharth0203/DemoPythonJenkins.git"    // Your GitHub repo URL
+  environment {
+    // 🔧 Jenkins credentials ID for Docker Hub
+    DOCKERHUB_CREDS = credentials('dockerhub-password')
+
+    // 🔧 Docker Hub image name (your repo)
+    IMAGE_NAME = "siddharthjamalpur/siddharth-test"
+  }
+
+  options {
+    timestamps()
+    ansiColor('xterm')
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        echo "📦 Cloning repository..."
+        checkout scm
+        sh 'git branch -v || true'
+      }
     }
 
-    stages {
-
-        stage('Clone Repository') {
-            steps {
-                echo "Cloning the repository..."
-                git branch: 'main', url: "${GIT_REPO}"
-            }
+    stage('Build Docker Image') {
+      steps {
+        script {
+          echo "🐳 Building Docker image..."
+          sh """
+            docker build -t generic-app:${BUILD_NUMBER} .
+            docker tag generic-app:${BUILD_NUMBER} ${IMAGE_NAME}:${BUILD_NUMBER}
+          """
         }
+      }
+    }
 
-        stage('Build Docker Image') {
-            steps {
-                echo "Building the Docker image..."
-                // 👇 Change path if your Dockerfile is not in the root folder
-                sh "docker build -t ${IMAGE_NAME}:latest ."
-            }
-        }
+    stage('Scan Docker Image (Trivy)') {
+      steps {
+        script {
+          echo "🔍 Scanning Docker image with Trivy..."
+          // Scan the image for vulnerabilities and save report
+          sh '''
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:latest image \
+              --exit-code 0 --no-progress --format json generic-app:${BUILD_NUMBER} > scan.json || true
+          '''
 
-        stage('Login to Docker Hub') {
-            steps {
-                echo "Logging in to Docker Hub..."
-                sh "echo ${DOCKERHUB_CREDENTIALS_PSW} | docker login -u ${DOCKERHUB_CREDENTIALS_USR} --password-stdin"
-            }
+          // Count vulnerabilities (using jq)
+          def vulnCount = sh(script: "cat scan.json | jq '.Results[0].Vulnerabilities | length' 2>/dev/null || echo 0", returnStdout: true).trim()
+          echo "🧮 Vulnerabilities found: ${vulnCount}"
+          env.VULN_COUNT = vulnCount
         }
-        
-        stage('Scan Image Locally with Grype') {
-          steps {
-            echo "🔍 Scanning Docker image with Anchore Grype..."
-            sh """
-              docker run --rm \
-                -v /var/run/docker.sock:/var/run/docker.sock \
-                anchore/grype:latest ${IMAGE_NAME}:latest
-            """
+      }
+    }
+
+    stage('Evaluate Scan Results') {
+      steps {
+        script {
+          def score = (env.VULN_COUNT ?: '0').toInteger()
+          if (score >= 5) {
+            echo "❌ Too many vulnerabilities (${score} >= 5). Aborting push."
+            currentBuild.result = 'ABORTED'
+            error("Build stopped due to high vulnerability count.")
+          } else {
+            echo "✅ Vulnerability score acceptable (${score} < 5). Proceeding to push."
           }
         }
-        
-        stage('Check Vulnerability Score') {
-            steps {
-                script {
-                    def highCriticalCount = sh(script: "cat grype-report.json | jq '.matches[].vulnerability.severity' | grep -E 'High|Critical' | wc -l", returnStdout: true).trim()
-                    echo "Number of High/Critical vulnerabilities: ${highCriticalCount}"
-
-                    if (highCriticalCount.toInteger() > 0) {
-                        error("❌ Vulnerabilities too high — stopping pipeline.")
-                    } else {
-                        echo "✅ Vulnerability level acceptable — proceeding to push."
-                    }
-                }
-            }
-        }
-
-        stage('Push to Docker Hub') {
-            steps {
-                echo "Pushing the Docker image to Docker Hub..."
-                sh "docker push ${IMAGE_NAME}:latest"
-            }
-        }
+      }
     }
 
-    post {
-        success {
-            echo "✅ Build and Push successful!"
+    stage('Push to Docker Hub') {
+      when {
+        expression { currentBuild.result == null || currentBuild.result == 'SUCCESS' }
+      }
+      steps {
+        withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CREDS}", usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
+          sh '''
+            echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
+            docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+          '''
         }
-        failure {
-            echo "❌ Build failed. Check logs."
-        }
+      }
     }
+  }
+
+  post {
+    always {
+      echo "Pipeline completed with status: ${currentBuild.result ?: 'SUCCESS'}"
+      archiveArtifacts artifacts: 'scan.json', allowEmptyArchive: true
+      sh 'docker image rm generic-app:${BUILD_NUMBER} || true'
+      sh "docker image rm ${IMAGE_NAME}:${BUILD_NUMBER} || true"
+    }
+    success {
+      echo "🎉 Image pushed successfully to Docker Hub!"
+    }
+    aborted {
+      echo "⚠️ Pipeline aborted due to vulnerabilities."
+    }
+    failure {
+      echo "❌ Pipeline failed."
+    }
+  }
 }
